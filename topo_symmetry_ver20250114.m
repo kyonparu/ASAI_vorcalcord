@@ -1,0 +1,303 @@
+% トポグラフィ解析プログラム（統合版: LとRの範囲を常に一致させる）
+clear; clc; close all;
+
+%% 1. AVIファイルを参照で開く
+[filename, filepath] = uigetfile('*.avi', 'AVIファイルを選択してください');
+if isequal(filename, 0)
+    disp('ファイルが選択されませんでした。');
+    return;
+end
+aviPath = fullfile(filepath, filename);
+
+% 動画の読み込み
+vid = VideoReader(aviPath);
+numFrames = vid.NumFrames;
+frameHeight = vid.Height;
+frameWidth = vid.Width;
+frameRate = 2000 / 0.5; % 2000フレームで0.5秒の動画から計算
+
+%% 解析設定
+windowSize = 2000;
+rawIntensity = zeros(frameHeight, frameWidth, numFrames, 'single');
+
+% 動画全体をグレースケールで読み込む
+for k = 1:numFrames
+    frame = read(vid, k);
+    if size(frame, 3) == 3
+        rawIntensity(:, :, k) = single(rgb2gray(frame));
+    else
+        rawIntensity(:, :, k) = single(frame);
+    end
+end
+
+%% 平均輝度レベルを差し引く正規化
+avgIntensity = movmean(rawIntensity, windowSize, 3);
+normalizedIntensity = rawIntensity - avgIntensity;
+
+%% ハミング窓の適用
+hammingWindow = hamming(numFrames, 'periodic');
+hammingWindow3D = reshape(hammingWindow, [1, 1, numFrames]);
+windowedIntensity = normalizedIntensity .* hammingWindow3D;
+
+%% 離散フーリエ変換
+fftResult = fft(windowedIntensity, [], 3);
+amplitude = abs(fftResult);
+phase = angle(fftResult);
+frequency = (0:numFrames-1) * (frameRate / numFrames);
+
+% 最大振幅成分を抽出（基本周波数のみを考慮）
+[~, maxIdx] = max(amplitude(:, :, 2:end), [], 3); % 基本周波数はDC成分を除いた2:end
+maxAmplitude = max(amplitude(:, :, 2:end), [], 3);
+maxFrequency = frequency(maxIdx + 1); % インデックスを補正
+
+% 最大振幅成分の位相分布を計算（基準フレームに戻す）
+maxPhase = zeros(size(phase, 1), size(phase, 2)); % 初期化
+for i = 1:size(phase, 1)
+    for j = 1:size(phase, 2)
+        maxPhase(i, j) = phase(i, j, maxIdx(i, j) + 1);
+    end
+end
+
+% 位相を0～2πに正規化
+maxPhase = mod(maxPhase, 2 * pi);
+
+% NaN/Inf処理（必要であれば）
+maxPhase(isnan(maxPhase) | isinf(maxPhase)) = 0;
+
+%% 対称線（左右）のインタラクティブな指定
+figure;
+imagesc(maxAmplitude); axis image; colorbar;
+title('Click to select symmetry line (X-coordinate)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+[xClick, ~] = ginput(1); % ユーザーにクリックさせる
+centerX = round(xClick);
+
+% 入力チェック
+if centerX < 1 || centerX > frameWidth
+    error('指定されたX座標が範囲外です。');
+end
+
+% 左右の領域の長さを修正
+widthLR = min(centerX - 1, frameWidth - centerX); % 対称線から短い方の幅
+L_start = centerX - widthLR; % 左の範囲開始
+L_end = centerX - 1;         % 左の範囲終了
+R_start = centerX + 1;       % 右の範囲開始
+R_end = centerX + widthLR;   % 右の範囲終了
+
+% 領域チェック
+if L_start < 1 || R_end > frameWidth
+    error('指定されたX座標に基づく左右の領域が画像の範囲を超えています。');
+end
+
+%% 対称線（前後）のインタラクティブな指定
+figure;
+imagesc(maxAmplitude); axis image; colorbar;
+title('Click to select symmetry line (Y-coordinate)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+[~, yClick] = ginput(1); % ユーザーにクリックさせる
+centerY = round(yClick);
+
+% 入力チェック
+if centerY < 1 || centerY > frameHeight
+    error('指定されたY座標が範囲外です。');
+end
+
+% 前後の領域の長さを修正
+heightUD = min(centerY - 1, frameHeight - centerY); % 対称線から短い方の高さ
+U_start = centerY - heightUD; % 上の範囲開始
+U_end = centerY - 1;          % 上の範囲終了
+D_start = centerY + 1;        % 下の範囲開始
+D_end = centerY + heightUD;   % 下の範囲終了
+
+% 領域チェック
+if U_start < 1 || D_end > frameHeight
+    error('指定されたY座標に基づく前後の領域が画像の範囲を超えています。');
+end
+
+%% 対称性解析（左右）
+% 振幅の左右対称性
+ampDiffLR = abs(maxAmplitude(:, L_start:L_end) - fliplr(maxAmplitude(:, R_start:R_end)));
+
+% 位相の左右対称性
+phaseDiffLR = abs(maxPhase(:, L_start:L_end) - fliplr(maxPhase(:, R_start:R_end)));
+
+% 周波数の左右対称性
+freqDiffLR = abs(maxFrequency(:, L_start:L_end) - fliplr(maxFrequency(:, R_start:R_end)));
+
+%% 対称性解析（前後）
+% 振幅の前後対称性
+ampDiffUD = abs(maxAmplitude(U_start:U_end, :) - flipud(maxAmplitude(D_start:D_end, :)));
+
+% 位相の前後対称性
+phaseDiffUD = abs(maxPhase(U_start:U_end, :) - flipud(maxPhase(D_start:D_end, :)));
+
+% 周波数の前後対称性
+freqDiffUD = abs(maxFrequency(U_start:U_end, :) - flipud(maxFrequency(D_start:D_end, :)));
+
+%% 結果のまとめ（6行×3列）
+resultFig = figure;
+
+% 一段目（元の画像: 振幅、位相、周波数）
+subplot(6, 3, 1);
+imagesc(maxAmplitude); axis image; colorbar;
+title('Original Amplitude');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+subplot(6, 3, 2);
+imagesc(maxPhase, [0, 2*pi]); axis image; colorbar;
+title('Original Phase');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+colorbar('Ticks', [0, pi, 2*pi], 'TickLabels', {'0', '\pi', '2\pi'});
+
+subplot(6, 3, 3);
+imagesc(maxFrequency, [0, max(maxFrequency(:))]); axis image; colorbar;
+title('Original Frequency');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+% 二段目（対称線を引いた画像: 振幅、位相、周波数）
+subplot(6, 3, 4);
+imagesc(maxAmplitude); axis image; colorbar;
+hold on;
+plot([centerX, centerX], ylim, 'r--', 'LineWidth', 1.5);
+plot(xlim, [centerY, centerY], 'g--', 'LineWidth', 1.5);
+title('Amplitude with Symmetry Lines');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+subplot(6, 3, 5);
+imagesc(maxPhase, [0, 2*pi]); axis image; colorbar;
+hold on;
+plot([centerX, centerX], ylim, 'r--', 'LineWidth', 1.5);
+plot(xlim, [centerY, centerY], 'g--', 'LineWidth', 1.5);
+title('Phase with Symmetry Lines');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+colorbar('Ticks', [0, pi, 2*pi], 'TickLabels', {'0', '\pi', '2\pi'});
+
+subplot(6, 3, 6);
+imagesc(maxFrequency, [0, max(maxFrequency(:))]); axis image; colorbar;
+hold on;
+plot([centerX, centerX], ylim, 'r--', 'LineWidth', 1.5);
+plot(xlim, [centerY, centerY], 'g--', 'LineWidth', 1.5);
+title('Frequency with Symmetry Lines');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+% 三段目（左右トリミング範囲を全体画像に表示）
+subplot(6, 3, 7);
+grayAmplitude = maxAmplitude;
+grayAmplitude(:, 1:L_start-1) = 0.5 * max(grayAmplitude(:));
+grayAmplitude(:, R_end+1:end) = 0.5 * max(grayAmplitude(:));
+imagesc(grayAmplitude); axis image; colorbar;
+hold on;
+plot([centerX, centerX], ylim, 'r--', 'LineWidth', 1.5);
+rectangle('Position', [L_start, 1, L_end - L_start + 1, frameHeight], 'EdgeColor', 'r', 'LineWidth', 1.5);
+rectangle('Position', [R_start, 1, R_end - R_start + 1, frameHeight], 'EdgeColor', 'r', 'LineWidth', 1.5);
+title('Amplitude L-R Calculation Range');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+subplot(6, 3, 8);
+grayPhase = maxPhase;
+grayPhase(:, 1:L_start-1) = 0.5 * max(grayPhase(:));
+grayPhase(:, R_end+1:end) = 0.5 * max(grayPhase(:));
+imagesc(grayPhase, [0, 2*pi]); axis image; colorbar;
+hold on;
+plot([centerX, centerX], ylim, 'r--', 'LineWidth', 1.5);
+rectangle('Position', [L_start, 1, L_end - L_start + 1, frameHeight], 'EdgeColor', 'r', 'LineWidth', 1.5);
+rectangle('Position', [R_start, 1, R_end - R_start + 1, frameHeight], 'EdgeColor', 'r', 'LineWidth', 1.5);
+title('Phase L-R Calculation Range');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+colorbar('Ticks', [0, pi, 2*pi], 'TickLabels', {'0', '\pi', '2\pi'});
+
+subplot(6, 3, 9);
+grayFrequency = maxFrequency;
+grayFrequency(:, 1:L_start-1) = 0.5 * max(grayFrequency(:));
+grayFrequency(:, R_end+1:end) = 0.5 * max(grayFrequency(:));
+imagesc(grayFrequency, [0, max(maxFrequency(:))]); axis image; colorbar;
+hold on;
+plot([centerX, centerX], ylim, 'r--', 'LineWidth', 1.5);
+rectangle('Position', [L_start, 1, L_end - L_start + 1, frameHeight], 'EdgeColor', 'r', 'LineWidth', 1.5);
+rectangle('Position', [R_start, 1, R_end - R_start + 1, frameHeight], 'EdgeColor', 'r', 'LineWidth', 1.5);
+title('Frequency L-R Calculation Range');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+% 四段目（左右の引き算結果）
+subplot(6, 3, 10);
+imagesc(ampDiffLR); axis image; colorbar;
+title('Amplitude Symmetry (L-R)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+subplot(6, 3, 11);
+imagesc(phaseDiffLR, [0, 2*pi]); axis image; colorbar;
+title('Phase Symmetry (L-R)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+colorbar('Ticks', [0, pi, 2*pi], 'TickLabels', {'0', '\pi', '2\pi'});
+
+subplot(6, 3, 12);
+imagesc(freqDiffLR, [0, max(freqDiffLR(:))]); axis image; colorbar;
+title('Frequency Symmetry (L-R)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+% 五段目（前後トリミング範囲を全体画像に表示）
+subplot(6, 3, 13);
+grayAmplitudeUD = maxAmplitude;
+grayAmplitudeUD(1:U_start-1, :) = 0.5 * max(grayAmplitudeUD(:));
+grayAmplitudeUD(D_end+1:end, :) = 0.5 * max(grayAmplitudeUD(:));
+imagesc(grayAmplitudeUD); axis image; colorbar;
+hold on;
+plot(xlim, [centerY, centerY], 'g--', 'LineWidth', 1.5);
+rectangle('Position', [1, U_start, frameWidth, U_end - U_start + 1], 'EdgeColor', 'g', 'LineWidth', 1.5);
+rectangle('Position', [1, D_start, frameWidth, D_end - D_start + 1], 'EdgeColor', 'g', 'LineWidth', 1.5);
+title('Amplitude F-B Calculation Range');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+subplot(6, 3, 14);
+grayPhaseUD = maxPhase;
+grayPhaseUD(1:U_start-1, :) = 0.5 * max(grayPhaseUD(:));
+grayPhaseUD(D_end+1:end, :) = 0.5 * max(grayPhaseUD(:));
+imagesc(grayPhaseUD, [0, 2*pi]); axis image; colorbar;
+hold on;
+plot(xlim, [centerY, centerY], 'g--', 'LineWidth', 1.5);
+rectangle('Position', [1, U_start, frameWidth, U_end - U_start + 1], 'EdgeColor', 'g', 'LineWidth', 1.5);
+rectangle('Position', [1, D_start, frameWidth, D_end - D_start + 1], 'EdgeColor', 'g', 'LineWidth', 1.5);
+title('Phase F-B Calculation Range');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+colorbar('Ticks', [0, pi, 2*pi], 'TickLabels', {'0', '\pi', '2\pi'});
+
+subplot(6, 3, 15);
+grayFrequencyUD = maxFrequency;
+grayFrequencyUD(1:U_start-1, :) = 0.5 * max(grayFrequencyUD(:));
+grayFrequencyUD(D_end+1:end, :) = 0.5 * max(grayFrequencyUD(:));
+imagesc(grayFrequencyUD, [0, max(maxFrequency(:))]); axis image; colorbar;
+hold on;
+plot(xlim, [centerY, centerY], 'g--', 'LineWidth', 1.5);
+rectangle('Position', [1, U_start, frameWidth, U_end - U_start + 1], 'EdgeColor', 'g', 'LineWidth', 1.5);
+rectangle('Position', [1, D_start, frameWidth, D_end - D_start + 1], 'EdgeColor', 'g', 'LineWidth', 1.5);
+title('Frequency F-B Calculation Range');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+% 六段目（前後の引き算結果）
+subplot(6, 3, 16);
+imagesc(ampDiffUD); axis image; colorbar;
+title('Amplitude Symmetry (F-B)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+subplot(6, 3, 17);
+imagesc(phaseDiffUD, [0, 2*pi]); axis image; colorbar;
+title('Phase Symmetry (F-B)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+colorbar('Ticks', [0, pi, 2*pi], 'TickLabels', {'0', '\pi', '2\pi'});
+
+subplot(6, 3, 18);
+imagesc(freqDiffUD, [0, max(freqDiffUD(:))]); axis image; colorbar;
+title('Frequency Symmetry (F-B)');
+xlabel('Pixels (x)'); ylabel('Pixels (y)');
+
+% ウィンドウサイズを指定
+set(resultFig, 'Position', [100, 100, 1200, 1500]);  % 横1200, 縦1500
+
+% 図の保存
+[saveFileName, savePath] = uiputfile('*.png', '保存先を選択してください');
+if isequal(saveFileName, 0)
+    disp('保存がキャンセルされました。');
+else
+    saveas(resultFig, fullfile(savePath, ['Symmetry_' saveFileName]));
+    disp(['解析結果が保存されました: ', fullfile(savePath, ['Symmetry_' saveFileName])]);
+end
